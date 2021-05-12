@@ -5,6 +5,8 @@ using Microsoft.AspNetCore.Authorization;
 using Volo.Abp.Application.Dtos;
 using Volo.Abp.Application.Services;
 using Volo.Abp.Guids;
+using Volo.Docs.Documents;
+using Volo.Docs.Documents.FullSearch.Elastic;
 using Volo.Docs.Localization;
 using Volo.Docs.Projects;
 
@@ -14,15 +16,22 @@ namespace Volo.Docs.Admin.Projects
     public class ProjectAdminAppService : ApplicationService, IProjectAdminAppService
     {
         private readonly IProjectRepository _projectRepository;
+        private readonly IDocumentRepository _documentRepository;
+        private readonly IDocumentFullSearch _elasticSearchService;
         private readonly IGuidGenerator _guidGenerator;
 
         public ProjectAdminAppService(
-            IProjectRepository projectRepository, IGuidGenerator guidGenerator)
+            IProjectRepository projectRepository,
+            IDocumentRepository documentRepository,
+            IDocumentFullSearch elasticSearchService,
+            IGuidGenerator guidGenerator)
         {
             ObjectMapperContext = typeof(DocsAdminApplicationModule);
             LocalizationResource = typeof(DocsResource);
 
             _projectRepository = projectRepository;
+            _documentRepository = documentRepository;
+            _elasticSearchService = elasticSearchService;
             _guidGenerator = guidGenerator;
         }
 
@@ -32,9 +41,10 @@ namespace Volo.Docs.Admin.Projects
 
             var totalCount = await _projectRepository.GetCountAsync();
 
-            var dtos = ObjectMapper.Map<List<Project>, List<ProjectDto>>(projects);
-
-            return new PagedResultDto<ProjectDto>(totalCount, dtos);
+            return new PagedResultDto<ProjectDto>(
+                totalCount,
+                ObjectMapper.Map<List<Project>, List<ProjectDto>>(projects)
+                );
         }
 
         public async Task<ProjectDto> GetAsync(Guid id)
@@ -51,7 +61,7 @@ namespace Volo.Docs.Admin.Projects
             {
                 throw new ProjectShortNameAlreadyExistsException(input.ShortName);
             }
-            
+
             var project = new Project(_guidGenerator.Create(),
                 input.Name,
                 input.ShortName,
@@ -71,7 +81,7 @@ namespace Volo.Docs.Admin.Projects
             {
                 project.ExtraProperties.Add(extraProperty.Key, extraProperty.Value);
             }
-            
+
             project = await _projectRepository.InsertAsync(project);
 
             return ObjectMapper.Map<Project, ProjectDto>(project);
@@ -106,6 +116,50 @@ namespace Volo.Docs.Admin.Projects
         {
             await _projectRepository.DeleteAsync(id);
         }
-        
+
+        public async Task ReindexAsync(ReindexInput input)
+        {
+            _elasticSearchService.ValidateElasticSearchEnabled();
+
+            await ReindexProjectAsync(input.ProjectId);
+        }
+
+        private async Task ReindexProjectAsync(Guid projectId)
+        {
+            var project = await _projectRepository.FindAsync(projectId);
+            if (project == null)
+            {
+                throw new Exception("Cannot find the project with the Id " + projectId);
+            }
+
+            var docs = await _documentRepository.GetListByProjectId(project.Id);
+            await _elasticSearchService.DeleteAllByProjectIdAsync(project.Id);
+
+            foreach (var doc in docs)
+            {
+                if (doc.FileName == project.NavigationDocumentName)
+                {
+                    continue;
+                }
+
+                if (doc.FileName == project.ParametersDocumentName)
+                {
+                    continue;
+                }
+
+                await _elasticSearchService.AddOrUpdateAsync(doc);
+            }
+        }
+
+        public async Task ReindexAllAsync()
+        {
+            _elasticSearchService.ValidateElasticSearchEnabled();
+            var projects = await _projectRepository.GetListAsync();
+         
+            foreach (var project in projects)
+            {
+                await ReindexProjectAsync(project.Id);
+            }
+        }
     }
 }

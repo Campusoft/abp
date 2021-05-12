@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Razor.TagHelpers;
 
 namespace Volo.Abp.AspNetCore.Mvc.UI.Bootstrap.TagHelpers.Form
 {
+    [OutputElementHint("select")]
     public class AbpSelectTagHelper : AbpTagHelper<AbpSelectTagHelper, AbpSelectTagHelperService>
     {
         public ModelExpression AspFor { get; set; }
@@ -21,9 +22,19 @@ namespace Volo.Abp.AspNetCore.Mvc.UI.Bootstrap.TagHelpers.Form
         [HtmlAttributeName("required-symbol")]
         public bool DisplayRequiredSymbol { get; set; } = true;
 
-        [HtmlAttributeNotBound]
-        [ViewContext]
-        public ViewContext ViewContext { get; set; }
+        public string AutocompleteApiUrl { get; set; }
+
+        public string AutocompleteItemsPropertyName { get; set; }
+
+        public string AutocompleteDisplayPropertyName { get; set; }
+
+        public string AutocompleteValuePropertyName { get; set; }
+
+        public string AutocompleteFilterParamName { get; set; }
+
+        public string AutocompleteSelectedItemName { get; set; }
+
+        public string AutocompleteSelectedItemValue { get; set; }
 
         public AbpSelectTagHelper(AbpSelectTagHelperService tagHelperService)
             : base(tagHelperService)

@@ -3,9 +3,11 @@ using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using NuGet.Versioning;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Text;
 using System.Threading.Tasks;
 using Volo.Abp.Cli.Args;
 using Volo.Abp.Cli.Commands;
@@ -20,13 +22,13 @@ namespace Volo.Abp.Cli
         public ILogger<CliService> Logger { get; set; }
         protected ICommandLineArgumentParser CommandLineArgumentParser { get; }
         protected ICommandSelector CommandSelector { get; }
-        protected IHybridServiceScopeFactory ServiceScopeFactory { get; }
+        protected IServiceScopeFactory ServiceScopeFactory { get; }
         protected NuGetService NuGetService { get; }
 
         public CliService(
             ICommandLineArgumentParser commandLineArgumentParser,
             ICommandSelector commandSelector,
-            IHybridServiceScopeFactory serviceScopeFactory,
+            IServiceScopeFactory serviceScopeFactory,
             NuGetService nugetService)
         {
             CommandLineArgumentParser = commandLineArgumentParser;
@@ -41,27 +43,76 @@ namespace Volo.Abp.Cli
         {
             Logger.LogInformation("ABP CLI (https://abp.io)");
 
-            await CheckCliVersionAsync();
-
+#if !DEBUG
+            if (!commandLineArgs.Options.ContainsKey("skip-cli-version-check"))
+            {
+                await CheckCliVersionAsync();
+            }
+#endif
             var commandLineArgs = CommandLineArgumentParser.Parse(args);
+            
+            try
+            {
+                if (commandLineArgs.IsCommand("batch"))
+                {
+                    await RunBatchAsync(commandLineArgs);
+                }
+                else
+                {
+                    await RunInternalAsync(commandLineArgs);
+                }
+            }
+            catch (CliUsageException usageException)
+            {
+                Logger.LogWarning(usageException.Message);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogException(ex);
+            }
+        }
+
+        private async Task RunBatchAsync(CommandLineArgs commandLineArgs)
+        {
+            var targetFile = commandLineArgs.Target;
+            if (targetFile.IsNullOrWhiteSpace())
+            {
+                throw new CliUsageException(
+                    "Must provide a file name/path that contains a list of commands" +
+                    Environment.NewLine + Environment.NewLine +
+                    "Example: " +
+                    "  abp batch commands.txt"
+                    );
+            }
+
+            var filePath = Path.Combine(Directory.GetCurrentDirectory(), targetFile);
+            var fileLines = File.ReadAllLines(filePath);
+            foreach (var line in fileLines)
+            {
+                var lineText = line;
+                if (lineText.IsNullOrWhiteSpace() || lineText.StartsWith("#"))
+                {
+                    continue;
+                }
+
+                if (lineText.Contains('#'))
+                {
+                    lineText = lineText.Substring(0, lineText.IndexOf('#'));
+                }
+
+                var args = CommandLineArgumentParser.Parse(lineText);
+                await RunInternalAsync(args);
+            }
+        }
+        
+        private async Task RunInternalAsync(CommandLineArgs commandLineArgs)
+        {
             var commandType = CommandSelector.Select(commandLineArgs);
 
             using (var scope = ServiceScopeFactory.CreateScope())
             {
-                var command = (IConsoleCommand)scope.ServiceProvider.GetRequiredService(commandType);
-
-                try
-                {
-                    await command.ExecuteAsync(commandLineArgs);
-                }
-                catch (CliUsageException usageException)
-                {
-                    Logger.LogWarning(usageException.Message);
-                }
-                catch (Exception ex)
-                {
-                    Logger.LogException(ex);
-                }
+                var command = (IConsoleCommand) scope.ServiceProvider.GetRequiredService(commandType);
+                await command.ExecuteAsync(commandLineArgs);
             }
         }
 
@@ -69,10 +120,10 @@ namespace Volo.Abp.Cli
         {
             var assembly = typeof(CliService).Assembly;
             var toolPath = GetToolPath(assembly);
-            var currentCliVersion = await GetCurrentCliVersion(assembly);
+            var currentCliVersion = await GetCurrentCliVersionInternalAsync(assembly);
             var updateChannel = GetUpdateChannel(currentCliVersion);
 
-            Logger.LogInformation($"Version {currentCliVersion} ({updateChannel} channel)");
+            Logger.LogInformation($"Version {currentCliVersion} ({updateChannel})");
 
             try
             {
@@ -90,7 +141,7 @@ namespace Volo.Abp.Cli
             }
         }
 
-        private static string GetToolPath(Assembly assembly)
+        private string GetToolPath(Assembly assembly)
         {
             if (!assembly.Location.Contains(".store"))
             {
@@ -100,7 +151,12 @@ namespace Volo.Abp.Cli
             return assembly.Location.Substring(0, assembly.Location.IndexOf(".store", StringComparison.Ordinal));
         }
 
-        private static async Task<SemanticVersion> GetCurrentCliVersion(Assembly assembly)
+        public async Task<SemanticVersion> GetCurrentCliVersionAsync(Assembly assembly)
+        {
+            return await GetCurrentCliVersionInternalAsync(assembly);
+        }
+
+        private async Task<SemanticVersion> GetCurrentCliVersionInternalAsync(Assembly assembly)
         {
             SemanticVersion currentCliVersion = default;
 
@@ -130,7 +186,7 @@ namespace Volo.Abp.Cli
             return currentCliVersion;
         }
 
-        private static UpdateChannel GetUpdateChannel(SemanticVersion currentCliVersion)
+        private UpdateChannel GetUpdateChannel(SemanticVersion currentCliVersion)
         {
             if (!currentCliVersion.IsPrerelease)
             {
@@ -158,7 +214,7 @@ namespace Volo.Abp.Cli
                     return await NuGetService.GetLatestVersionOrNullAsync("Volo.Abp.Cli");
 
                 case UpdateChannel.Prerelease:
-                    return await NuGetService.GetLatestVersionOrNullAsync("Volo.Abp.Cli", includePreviews: true);
+                    return await NuGetService.GetLatestVersionOrNullAsync("Volo.Abp.Cli", includeReleaseCandidates: true);
 
                 case UpdateChannel.Nightly:
                     return await NuGetService.GetLatestVersionOrNullAsync("Volo.Abp.Cli", includeNightly: true);
@@ -168,7 +224,7 @@ namespace Volo.Abp.Cli
             }
         }
 
-        private static bool IsGlobalTool(string toolPath)
+        private bool IsGlobalTool(string toolPath)
         {
             var globalPaths = new[] { @"%USERPROFILE%\.dotnet\tools\", "%HOME%/.dotnet/tools/", };
             return globalPaths.Select(Environment.ExpandEnvironmentVariables).Contains(toolPath);
@@ -190,8 +246,7 @@ namespace Volo.Abp.Cli
                     break;
 
                 case UpdateChannel.Prerelease:
-                    Logger.LogWarning($"dotnet tool uninstall {toolPathArg} Volo.Abp.Cli");
-                    Logger.LogWarning($"dotnet tool install {toolPathArg} Volo.Abp.Cli --version {latestVersion}");
+                    Logger.LogWarning($"dotnet tool update {toolPathArg} Volo.Abp.Cli --version {latestVersion}");
                     break;
 
                 case UpdateChannel.Nightly:
